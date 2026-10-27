@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.log
+*.pid
+.rgw/
+node_modules/

@@ -1,0 +1,267 @@
+#!/usr/bin/env bash
+# rgw — rikka-gateway 管理工具 (start/stop/status/log/check/smoke/url/edit)
+set -uo pipefail
+
+SELF="${BASH_SOURCE[0]}"
+while [[ -L "$SELF" ]]; do                       # 解析软链, 保证装了 PATH 链接也能定位到项目目录
+  t="$(readlink "$SELF")"; [[ "$t" == /* ]] && SELF="$t" || SELF="$(dirname "$SELF")/$t"
+done
+DIR="$(cd "$(dirname "$SELF")" && pwd)"          # 源码目录 (只读使用)
+RUNTIME="${RGW_HOME:-$HOME/.rgw}"                # 运行时目录: 日志/pid/pycache
+mkdir -p "$RUNTIME"
+PID_FILE="$RUNTIME/gateway.pid"
+LOG_FILE="$RUNTIME/gateway.log"
+export PYTHONPYCACHEPREFIX="$RUNTIME/pycache"    # 不在源码目录留 __pycache__
+PY="${PYTHON:-python3}"
+cd "$RUNTIME" || exit 1
+
+if [[ -t 1 ]]; then
+  G=$'\e[32m'; R=$'\e[31m'; Y=$'\e[33m'; B=$'\e[36m'; D=$'\e[2m'; N=$'\e[0m'
+else
+  G=''; R=''; Y=''; B=''; D=''; N=''
+fi
+ok()   { echo "  ${G}✓${N} $*"; }
+bad()  { echo "  ${R}✗${N} $*"; }
+warn() { echo "  ${Y}!${N} $*"; }
+hdr()  { echo "${B}$*${N}"; }
+
+# ---------- 配置 (从 rules.py 读, 读不到就用默认) ----------
+cfg() {
+  $PY - "$DIR" "$1" <<'PY' 2>/dev/null
+import sys
+sys.path.insert(0, sys.argv[1])
+import rules
+print({"lport": rules.LISTEN[1], "uport": rules.UPSTREAM[1],
+       "uhost": rules.UPSTREAM[0]}[sys.argv[2]])
+PY
+}
+LPORT="$(cfg lport)"; LPORT="${LPORT:-9000}"
+UPORT="$(cfg uport)"; UPORT="${UPORT:-8080}"
+UHOST="$(cfg uhost)"; UHOST="${UHOST:-127.0.0.1}"
+
+port_open() { # $1=port
+  $PY - "$1" <<'PY'
+import socket, sys
+s = socket.socket(); s.settimeout(0.4)
+sys.exit(0 if s.connect_ex(("127.0.0.1", int(sys.argv[1]))) == 0 else 1)
+PY
+}
+
+find_pid() {
+  if [[ -f "$PID_FILE" ]]; then
+    local p; p="$(cat "$PID_FILE" 2>/dev/null)"
+    if [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null; then echo "$p"; return; fi
+  fi
+  local d cmd
+  for d in /proc/[0-9]*; do
+    [[ -r "$d/cmdline" ]] || continue
+    cmd="$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null)"
+    if [[ "$cmd" == *"$DIR/gateway.py"* || "$cmd" == *"python"*" gateway.py"* ]]
+    then echo "${d#/proc/}"; return; fi
+  done
+}
+
+wait_port() { # $1=port $2=秒
+  local i n=$(( ${2:-5} * 10 ))
+  for ((i = 0; i < n; i++)); do port_open "$1" && return 0; sleep 0.1; done
+  return 1
+}
+
+# ---------- 命令 ----------
+cmd_start() {
+  local pid; pid="$(find_pid)"
+  if [[ -n "$pid" ]]; then
+    echo "已在运行 (pid $pid) → http://127.0.0.1:$LPORT/"; return 1
+  fi
+  if port_open "$LPORT"; then
+    echo "${R}端口 $LPORT 已被其它进程占用${N} (查看: ss -ltnp | grep $LPORT)"; return 1
+  fi
+  if ! port_open "$UPORT"; then
+    warn "上游 $UHOST:$UPORT 未响应 — 网关仍会启动, 但请求会 502"
+  fi
+  local newpid
+  newpid="$( cd "$RUNTIME" && { nohup "$PY" "$DIR/gateway.py" >>"$LOG_FILE" 2>&1 & echo $!; } )"
+  echo "$newpid" >"$PID_FILE"
+  if wait_port "$LPORT" 5; then
+    ok "已启动 (pid $newpid) → http://127.0.0.1:$LPORT/  → $UHOST:$UPORT"
+  else
+    bad "启动失败, 最近日志:"; tail -n 15 "$LOG_FILE"
+    kill "$newpid" 2>/dev/null; rm -f "$PID_FILE"; return 1
+  fi
+}
+
+cmd_stop() {
+  local pid; pid="$(find_pid)"
+  if [[ -z "$pid" ]]; then
+    rm -f "$PID_FILE"; echo "未在运行"; return 0
+  fi
+  kill "$pid" 2>/dev/null
+  local i
+  for ((i = 0; i < 30; i++)); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+  kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
+  rm -f "$PID_FILE"
+  ok "已停止 (pid $pid)"
+}
+
+cmd_restart() { cmd_stop; sleep 0.3; cmd_start; }
+
+cmd_status() {
+  local pid; pid="$(find_pid)"
+  hdr "rikka-gateway"
+  if [[ -n "$pid" ]]; then
+    local up; up="$(ps -o etime= -p "$pid" 2>/dev/null | tr -d ' ')"
+    ok "进程   running (pid $pid, 已运行 ${up:-?})"
+  else
+    bad "进程   stopped"
+  fi
+  if port_open "$LPORT"; then ok "端口   $LPORT 监听中"; else bad "端口   $LPORT 未监听"; fi
+  if port_open "$UPORT"; then ok "上游   $UHOST:$UPORT 在线"; else bad "上游   $UHOST:$UPORT 离线"; fi
+  local assets="$DIR/assets"
+  local n; n=$(ls "$assets" 2>/dev/null | wc -l)
+  echo "  ${D}运行   $RUNTIME (日志 gateway.log, pid gateway.pid)${N}"
+  echo "  ${D}规则   rules.py ($(stat -c %y "$DIR/rules.py" 2>/dev/null | cut -d. -f1))${N}"
+  echo "  ${D}资源   assets/ $n 个文件${N}"
+  if [[ -f "$LOG_FILE" ]]; then
+    echo "  ${D}日志   $(wc -l <"$LOG_FILE") 行, 最近一次请求:${N}"
+    grep -E '^\[gw\] [0-9]{3} ' "$LOG_FILE" | tail -n 1 | sed 's/^/         /'
+  fi
+  echo "  ${D}地址   http://$(lan_ip):$LPORT/${N}"
+}
+
+lan_ip() {
+  $PY - <<'PY' 2>/dev/null || echo 127.0.0.1
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+try:
+    s.connect(("8.8.8.8", 80)); print(s.getsockname()[0])
+except OSError:
+    print("127.0.0.1")
+PY
+}
+
+cmd_log() {
+  [[ -f "$LOG_FILE" ]] || { echo "暂无日志"; return 1; }
+  if [[ "${1:-}" == "-f" ]]; then tail -f "$LOG_FILE"
+  else tail -n "${1:-40}" "$LOG_FILE"; fi
+}
+
+cmd_check() {
+  hdr "规则/资产自检"
+  $PY - "$DIR" <<'PY'
+import sys, os, socket
+DIR = sys.argv[1]; sys.path.insert(0, DIR)
+import rules
+okall = True
+def bad(m):
+    global okall; okall = False; print("  \033[31m✗\033[0m " + m) if os.isatty(1) else print("  x " + m)
+def good(m):
+    print("  \033[32m✓\033[0m " + m) if os.isatty(1) else print("  . " + m)
+
+err = rules.validate()
+(good if not err else bad)("rules.validate() " + (err or "OK"))
+
+for p, rel in rules.STATIC_OVERRIDES.items():
+    fp = os.path.join(DIR, rel)
+    (good if os.path.isfile(fp) else bad)(f"静态覆盖 {p} -> {rel}" + (f" ({os.path.getsize(fp)}B)" if os.path.isfile(fp) else " 文件缺失"))
+
+base = f"http://{rules.UPSTREAM[0]}:{rules.UPSTREAM[1]}"
+def fetch(path):
+    import urllib.request
+    with urllib.request.urlopen(base + path, timeout=20) as r:
+        return r.status, r.read()
+
+if not rules.JS_REWRITES:
+    good("无 JS 资产改写")
+for path, pairs in rules.JS_REWRITES.items():
+    try:
+        st, body = fetch(path)
+    except Exception as e:
+        bad(f"JS 资产 {path} 拉取失败: {e}"); continue
+    if st != 200:
+        bad(f"JS 资产 {path} HTTP {st}"); continue
+    miss = [old for old, _ in pairs if old.encode() not in body]
+    if miss:
+        bad(f"JS 资产 {path}: {len(miss)}/{len(pairs)} 处锚点未命中 (升级后 hash/文案变了?)")
+        for m in miss[:3]:
+            print(f"      - {m[:70]}")
+    else:
+        good(f"JS 资产 {path}: {len(pairs)} 处锚点全部命中")
+
+for path in rules.API_REWRITES:
+    try:
+        st, _ = fetch(path)
+        (good if st == 200 else bad)(f"API 改写 {path} (HTTP {st})")
+    except Exception as e:
+        bad(f"API 改写 {path} 不可达: {e}")
+
+sys.exit(0 if okall else 1)
+PY
+}
+
+cmd_smoke() {
+  hdr "端到端冒烟 (经网关 :$LPORT)"
+  port_open "$LPORT" || { bad "网关未启动 (rgw start)"; return 1; }
+  local fail=0 gw up
+  gw="$(curl -s -m 10 "http://127.0.0.1:$LPORT/")"
+  up="$(curl -s -m 10 "http://$UHOST:$UPORT/")"
+  [[ -n "$gw" ]] || { bad "网关首页无响应"; return 1; }
+  if [[ "$gw" != "$up" ]]; then ok "首页已改写 (与上游内容不同)"
+  else bad "首页与上游一致 — HTML 注入未生效"; fail=1; fi
+
+  local p code
+  while IFS= read -r p; do
+    [[ -z "$p" ]] && continue
+    code="$(curl -s -o /dev/null -w '%{http_code}' -m 5 "http://127.0.0.1:$LPORT$p")"
+    if [[ "$code" == 200 ]]; then ok "静态覆盖 $p (200)"; else bad "静态覆盖 $p (HTTP $code)"; fail=1; fi
+  done < <($PY -c "import sys;sys.path.insert(0,'$DIR');import rules;print('\n'.join(rules.STATIC_OVERRIDES))" 2>/dev/null)
+
+  while IFS= read -r p; do
+    [[ -z "$p" ]] && continue
+    if cmp -s <(curl -s -m 30 "http://127.0.0.1:$LPORT$p") <(curl -s -m 30 "http://$UHOST:$UPORT$p"); then
+      bad "JS 改写未生效 $p (与上游相同)"; fail=1
+    else
+      ok "JS 改写 $p"
+    fi
+  done < <($PY -c "import sys;sys.path.insert(0,'$DIR');import rules;print('\n'.join(rules.JS_REWRITES))" 2>/dev/null)
+
+  [[ $fail -eq 0 ]] && { echo "  ${G}全部通过${N}"; return 0; }
+  echo "  ${R}存在失败项${N}"; return 1
+}
+
+cmd_banner() { echo "http://$(lan_ip):$LPORT/"; }
+
+cmd_edit() { "${EDITOR:-vi}" "$DIR/rules.py"; }
+
+cmd_help() {
+  cat <<H
+${B}rgw${N} — rikka-gateway
+  源码 $DIR
+  运行 $RUNTIME  (gateway.log / gateway.pid / pycache)
+  上游 $UHOST:$UPORT → 监听 :$LPORT
+
+  rgw start        后台启动 (nohup, 日志 gateway.log)
+  rgw stop         停止
+  rgw restart      重启
+  rgw status       进程/端口/上游/日志概览
+  rgw log [N|-f]   看日志 (默认 40 行, -f 跟随)
+  rgw check        规则自检 + JS 锚点/静态覆盖/API 校验 (RikkaHub 升级后先跑这个)
+  rgw smoke        端到端冒烟 (经网关请求首页/静态/JS 改写)
+  rgw url          打印局域网访问地址
+  rgw edit         编辑 rules.py (热重载, 无需重启)
+  rgw help         本帮助
+H
+}
+
+case "${1:-help}" in
+  start)   cmd_start ;;
+  stop)    cmd_stop ;;
+  restart) cmd_restart ;;
+  status)  cmd_status ;;
+  log)     shift; cmd_log "$@" ;;
+  check)   cmd_check ;;
+  smoke)   cmd_smoke ;;
+  url)     cmd_banner ;;
+  edit)    cmd_edit ;;
+  help|-h|--help) cmd_help ;;
+  *) echo "未知命令: $1"; echo; cmd_help; exit 1 ;;
+esac
