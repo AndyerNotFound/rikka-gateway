@@ -1,4 +1,4 @@
 #!/usr/bin/env python3
-"""入口: python gateway.py (规则在 rules.py, 改完自动生效)"""
+"""Entry point: python gateway.py (rules live in rules.py, hot-reloaded on save)"""
 from server import main
 main()

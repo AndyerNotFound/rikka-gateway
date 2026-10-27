@@ -1,4 +1,4 @@
-"""代理服务层 — 一般不用动, 改规则去 rules.py"""
+"""Proxy service layer - rarely needs edits; tweak rules in rules.py"""
 import http.client, importlib, json, os, re, time
 from urllib.parse import urlsplit
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -13,12 +13,12 @@ RULES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rules.py"
 _mtime = 0.0
 
 def get_rules():
-    """rules.py 变更时自动热重载"""
+    """Hot-reload rules.py on mtime change"""
     global _mtime, rules
     try:
         m = os.stat(RULES_FILE).st_mtime
         if m != _mtime:
-            if _mtime:  # 跳过首次加载的日志
+            if _mtime:  # skip log on first load
                 print(f"[gw] rules.py changed, reloading...", flush=True)
             err = None
             try:
@@ -27,7 +27,7 @@ def get_rules():
             except Exception as e:
                 err = f"reload failed: {e}"
             if err:
-                print(f"[gw!!] {err} (使用上一版规则)", flush=True)
+                print(f"[gw!!] {err} (keeping previous rules)", flush=True)
                 importlib.reload(rules) if err.startswith("reload") else None
             _mtime = m
     except OSError:
@@ -50,7 +50,7 @@ class Handler(BaseHTTPRequestHandler):
         R = get_rules()
         url = self.path
         p = urlsplit(url).path
-        # 静态覆盖: STATIC_OVERRIDES 里配置的路径直接回本地文件 (图标/品牌资源等)
+        # Static overrides: paths in STATIC_OVERRIDES are served from local files (icons/brand assets)
         fp = R.STATIC_OVERRIDES.get(p)
         if fp:
             try:
@@ -86,7 +86,7 @@ class Handler(BaseHTTPRequestHandler):
         ctype = (r.getheader("Content-Type") or "").lower()
         is_stream = any(s in ctype for s in STREAM_TYPES)
 
-        if is_stream:  # SSE: 不缓冲, 边收边发
+        if is_stream:  # SSE: stream through without buffering
             print(f"[gw-sse] OPEN {self.path} ({time.time()-t0:.2f}s)", flush=True)
             self.send_response(r.status)
             for k, v in r.getheaders():
@@ -97,7 +97,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             try:
                 while True:
-                    chunk = r.read1(8192)  # read1: 有数据就返回, 不凑满(否则小事件被扣到8KB才flush)
+                    chunk = r.read1(8192)  # read1 returns as soon as data arrives (otherwise small SSE events buffer up to 8KB)
                     if not chunk: break
                     for line in chunk.split(b"\n"):
                         if line.startswith(b"event:"):
@@ -142,6 +142,6 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     err = rules.validate()
     if err:
-        raise SystemExit(f"规则自检失败: {err}")
+        raise SystemExit(f"rules validation failed: {err}")
     print(f"[gw] listening {rules.LISTEN[0]}:{rules.LISTEN[1]} -> {rules.UPSTREAM[0]}:{rules.UPSTREAM[1]} (rules hot-reload on)", flush=True)
     ThreadingHTTPServer(tuple(rules.LISTEN), Handler).serve_forever()

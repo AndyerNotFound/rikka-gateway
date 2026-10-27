@@ -1,4 +1,4 @@
-// 代理服务层 — 一般不用动, 改规则去 rules.js
+// Proxy service layer - rarely needs edits; tweak rules in rules.js
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -13,13 +13,13 @@ function loadRules() {
   return r;
 }
 
-// 热重载: rules.js 变更时重新加载
+// Hot-reload rules.js on change
 let reloadTimer = null;
 fs.watch(RULES_FILE, () => {
   clearTimeout(reloadTimer);
   reloadTimer = setTimeout(() => {
     try { rules = loadRules(); }
-    catch (e) { console.error('[gw!!] rules reload failed (沿用上一版):', e.message); }
+    catch (e) { console.error('[gw!!] rules reload failed (keeping previous rules):', e.message); }
   }, 100);
 });
 
@@ -59,9 +59,9 @@ const server = http.createServer((req, res) => {
   const urlPath = new URL(req.url, 'http://x').pathname;
 
   const headers = stripHop(req.headers);
-  delete headers['accept-encoding']; // 拿未压缩内容便于改写
+  delete headers['accept-encoding']; // fetch uncompressed for easier rewriting
 
-  // 静态覆盖: rules.staticOverrides 里配置的路径直接回本地文件 (AI图标/品牌资源等)
+  // Static overrides: paths in rules.staticOverrides are served from local files
   if (rules.staticOverrides && rules.staticOverrides[urlPath]) {
     const fp = path.join(__dirname, rules.staticOverrides[urlPath]);
     fs.readFile(fp, (err, data) => {
@@ -85,14 +85,14 @@ const server = http.createServer((req, res) => {
       const isStream = ctype.includes('text/event-stream');
 
       if (isStream) {
-        // SSE: pipe 逐块透传, 无缓冲
+        // SSE: pipe through without buffering
         console.log(`[gw-sse] OPEN ${req.url} (${(Date.now() - t0) / 1000}s)`);
         res.writeHead(upRes.statusCode, {
           ...stripHop(upRes.headers),
           Connection: 'close',
           'Transfer-Encoding': 'chunked',
         });
-        upRes.pipe(res); // node stream 原生逐块转发, 有数据即发
+        upRes.pipe(res); // node streams forward chunk-by-chunk natively
         upRes.on('end', () => {
           console.log(`[gw-sse] CLOSE ${req.url} (${(Date.now() - t0) / 1000}s)`);
           res.end();

@@ -1,12 +1,12 @@
-"""网关改写规则 — 改完保存即自动生效(无需重启)"""
+"""Rewrite rules - edit and save, takes effect immediately (hot reload, no restart)"""
 import json
 import os
 
-# ===== 基础配置 =====
+# ===== Base config =====
 UPSTREAM = ("127.0.0.1", 8080)
 LISTEN = ("0.0.0.0", 9000)
 
-# ===== 静态资源覆盖: 路径 -> 本地文件 (相对 gateway 目录) =====
+# ===== Static overrides: path -> local file (relative to gateway dir) =====
 STATIC_OVERRIDES = {
     "/favicon.ico": "assets/codex.svg",
     "/__gw-assets/codex.svg": "assets/codex.svg",
@@ -21,7 +21,7 @@ def _load_svg(name: str) -> str:
         return ""
 
 
-# ===== 注入 CSS =====
+# ===== Injected CSS =====
 CSS = """
 div:has(>textarea[class*="min-h-"]){display:grid!important;grid-template-columns:auto 1fr auto auto;align-items:end;gap:4px 8px}
 div:has(>textarea[class*="min-h-"])>textarea{grid-area:1/2/2/3;min-height:2.25rem!important;max-height:9rem!important;field-sizing:content;padding-top:.4rem!important;padding-bottom:.4rem!important}
@@ -42,10 +42,10 @@ div:has(>textarea[class*="min-h-"]) div[class*="flex-wrap"]>*:nth-child(6){posit
 }
 """
 
-# ===== 注入 JS:
-# 1) 被隐藏的3个按钮以"图标+文字"菜单项进+号下拉菜单, 点击转发原按钮
-# 2) 模型选择按钮搬进窗口顶部标题栏右侧 (CSS fixed 会被 transform 祖先劫持, 必须搬 DOM)
-# 3) Codex 化: 品牌字换 Codex + 首页吉祥物换 OpenAI logo (继承 text-primary 颜色)
+# ===== Injected JS:
+# 1) 3 hidden buttons re-emerge as icon+label items inside the "+" dropdown, clicks forwarded to originals
+# 2) Model picker pill moved into the window title bar (CSS fixed is hijacked by transform ancestors; must move DOM)
+# 3) Rebrand: swap brand text to "Codex", replace home mascot with the OpenAI logo (inherits text-primary color)
 JS = "var OPENAI_SVG=" + json.dumps(_load_svg("openai.svg")) + ";\n" + r"""
 (function(){
   function q(sel){return document.querySelector(sel)}
@@ -114,7 +114,7 @@ JS = "var OPENAI_SVG=" + json.dumps(_load_svg("openai.svg")) + ";\n" + r"""
 })();
 """
 
-# ===== HTML 正则改写 (pattern, replacement) =====
+# ===== HTML regex rewrites (pattern, replacement) =====
 HTML_REWRITES = [
     (r"lang=\"en\"", "lang=\"zh-CN\""),
     (r"bg-primary animate-bounce", "bg-red-500 animate-pulse"),
@@ -123,9 +123,10 @@ HTML_REWRITES = [
     (r"</body>", "<script>" + JS + "</script>"),
 ]
 
-# ===== JS 资产字符串替换: {资产路径: [(旧串, 新串), ...]} =====
-# 注意: 资产名里的 hash 随上游构建变化, 属于具体部署细节。
-# 这里用占位符, 实际使用时换成自己环境的真实路径 (浏览器 Network 面板, 或跑 `rgw check` 看它报的路径)。
+# ===== JS asset string rewrites: {asset path: [(old, new), ...]} =====
+# NOTE: build hashes in asset names change whenever the upstream app updates.
+# Placeholders are used here; plug in real paths from your own deployment
+# (browser DevTools Network panel, or just run `rgw check` and read the reported paths).
 JS_REWRITES = {
     # "/assets/input-<HASH>.js": [
     #     ('meta:{title:"MyApp"}', 'meta:{title:"My App"}'),
@@ -135,7 +136,7 @@ JS_REWRITES = {
     # ],
 }
 
-# ===== API JSON 改写: {API路径: fn(json) -> json} =====
+# ===== API JSON rewrites: {api path: fn(json) -> json} =====
 API_REWRITES = {
     "/api/conversations": lambda data: [
         {**c, "title": (c["title"] or "(untitled)") + " [gw]"} for c in data
@@ -145,11 +146,11 @@ API_REWRITES = {
 
 
 def validate() -> str | None:
-    """规则自检, 返回错误信息或 None"""
+    """Rule self-check. Returns an error message, or None if everything is fine"""
     import re as _re
     for pat, _ in HTML_REWRITES:
         try:
             _re.compile(pat)
         except _re.error as e:
-            return f"HTML_REWRITES 正则错误: {pat!r}: {e}"
+            return f"HTML_REWRITES regex error: {pat!r}: {e}"
     return None

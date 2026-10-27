@@ -1,51 +1,174 @@
+<div align="center">
+
 # rikka-gateway
 
-一个极简的「改写代理」：挂在任意 Web 前端前面，按路径改写 HTML / JS / CSS / JSON 响应，
-用来做界面微调、品牌替换、注入补丁样式等，无需改动上游一行代码。
+**A rewriting gateway for the RikkaHub web UI — rebrand, restyle, and patch the frontend in flight, without touching the app itself.**
 
-```
-浏览器 ──► 网关 :9000 ──► 上游 Web :8080
-             │
-             ├─ HTML  → 正则改写 + 注入 CSS/JS
-             ├─ JS 资产 → 字符串替换（改文案/默认值）
-             ├─ JSON API → 结构化改写
-             └─ 静态路径 → 本地文件覆盖（图标/资源）
-```
+[![Python](https://img.shields.io/badge/python-3.10+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Node](https://img.shields.io/badge/node-%E2%89%A518-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
 
-## 文件
+[English](./README.md) · [中文](./README.zh-CN.md)
 
-| 文件 | 说明 |
+</div>
+
+---
+
+> **Note:** this gateway targets **RikkaHub's web channel specifically**. The bundled
+> rules match RikkaHub's DOM structure, asset names, and API paths — they will not
+> do anything useful against a different app. The mechanism itself is generic
+> (see [Writing rules](#writing-rules)), so you can adapt it to other apps by
+> replacing the rules.
+
+## What it does
+
+Out of the box, the bundled rules give RikkaHub's web UI a "Codex" treatment:
+
+| Area | Change |
 |---|---|
-| `gateway.py` / `gateway.js` | 入口（Python / Node 二选一） |
-| `server.py` / `server.js` | 代理层，一般不用动（SSE 透传、热重载） |
-| `rules.py` / `rules.js` | **规则文件，改完保存即生效**（热重载，无需重启） |
-| `rgw` | CLI 管理工具（start/stop/status/log/check/smoke） |
-| `assets/` | 静态覆盖用的本地资源 |
+| Branding | app title / header text → "Codex", OpenAI-style logo as home mascot, custom favicon |
+| Input bar | compact auto-growing textarea, tools row moved onto one line |
+| Toolbar | 3 overflow buttons folded into the "+" dropdown as icon+label items |
+| Model picker | pill relocated into the window title bar (DOM move — CSS `fixed` is hijacked by transform ancestors) |
+| Sidebar | always-expanded at desktop widths |
+| Copy | reasoning effort presets rendered as plain labels (None/Auto/Low/…) instead of i18n keys |
+| Misc | listing titles get a `[gw]` suffix so proxied pages are recognizable at a glance |
 
-## 用法
+```
+browser ──► gateway :9000 ──► RikkaHub web :8080
+                │
+                ├─ HTML       regex rewrites + injected CSS/JS
+                ├─ JS assets  string replacement in bundles
+                ├─ JSON APIs  structured transforms
+                └─ static     local file overrides (favicon, logos)
+```
+
+Rules live in **one small file** (`rules.py` or `rules.js`). Save it, and the
+gateway picks up changes on the **next request** — no restart, no rebuild.
+
+## Quick start
 
 ```bash
-./rgw start      # 后台启动，日志在 ~/.rgw/gateway.log
-./rgw status     # 进程 / 端口 / 上游 / 最近请求
-./rgw check      # 规则自检：正则、静态覆盖、JS 锚点是否仍命中上游、API 改写可达性
-./rgw smoke      # 端到端冒烟：经网关请求首页，校验注入与改写是否生效
-./rgw log -f     # 跟随日志
-./rgw edit       # 编辑 rules.py（保存即生效）
+git clone <repo> rikka-gateway
+cd rikka-gateway
+
+# 1. make sure RikkaHub web is reachable (default: 127.0.0.1:8080)
+#    and adjust the port if yours differs
+$EDITOR rules.py          # UPSTREAM = ("127.0.0.1", 8080)
+
+# 2. start (Python) — or `node gateway.js` for the Node version
+./rgw start
+
+# 3. open http://localhost:9000 — same app, patched on the way out
 ```
 
-运行时产物（日志 / pid / `__pycache__` / 调试页）统一放 `~/.rgw`，可用 `RGW_HOME` 覆盖，
-源码目录保持干净。
+## Writing rules
 
-## 规则怎么改
+All four rewrite layers are in `rules.py` (or `rules.js`):
 
-`rules.py` 里四类改写，按需增删：
+### 1. HTML regex — inject CSS/JS, swap strings
 
-1. **HTML_REWRITES** — 正则 `(pattern, replacement)`，可注入 `<style>` / `<script>`
-2. **JS_REWRITES** — `{资产路径: [(旧串, 新串), ...]}`，改前端打包产物里的文案/默认值
-3. **API_REWRITES** — `{API路径: fn(json) -> json}`，改接口返回
-4. **STATIC_OVERRIDES** — `{路径: 本地文件}`，直接覆盖图标等资源
+```python
+HTML_REWRITES = [
+    (r"</head>", "<style>/* your css */</style>"),
+    (r"bg-primary animate-bounce", "bg-red-500 animate-pulse"),
+]
+```
 
-### 关于资产路径里的 hash
+### 2. JS assets — change bundled copy/defaults
 
-打包产物的文件名带构建 hash（如 `input-a1b2c3d4.js`），上游升级就会变。
-先跑 `rgw check`，它会把失配的路径和锚点列出来；或直接看浏览器 Network 面板。
+Build hashes rotate on every RikkaHub release, so paths are placeholders.
+After an update, run `rgw check` — it lists exactly which anchors missed
+and on which files:
+
+```python
+JS_REWRITES = {
+    # "/assets/input-<HASH>.js": [
+    #     ('meta:{title:"RikkaHub Web"', 'meta:{title:"My Web"'),
+    # ],
+}
+```
+
+### 3. JSON APIs — structured transforms
+
+```python
+API_REWRITES = {
+    "/api/conversations": lambda data: [
+        {**c, "title": (c["title"] or "(untitled)") + " [gw]"} for c in data
+    ],
+}
+```
+
+### 4. Static overrides — serve local files for known paths
+
+```python
+STATIC_OVERRIDES = {
+    "/favicon.ico": "assets/codex.svg",
+}
+```
+
+Most of the UI changes are not regex at all — they're the **injected JS**
+(`rules.py` → `JS`): MutationObserver-based DOM tweaks that survive
+re-renders. Edit that to change what gets patched and how.
+
+## The `rgw` CLI
+
+```text
+rgw start        start in background (nohup, log to gateway.log)
+rgw stop         stop
+rgw restart      restart
+rgw status       process / port / upstream / log overview
+rgw log [N|-f]   show or follow logs
+rgw check        rule validation + JS anchor matching + API reachability  ← run after RikkaHub updates
+rgw smoke        end-to-end smoke test through the gateway
+rgw url          print LAN access URL
+rgw edit         edit rules.py (hot reload, no restart)
+```
+
+After every RikkaHub update, run `rgw check` once — bundle hashes change, so
+it verifies each JS anchor still matches and tells you which rules to update.
+
+## Files
+
+| File | Role |
+|---|---|
+| `gateway.py` / `gateway.js` | entry point (pick one runtime) |
+| `server.py` / `server.js` | proxy layer — SSE passthrough, hot reload; rarely needs edits |
+| `rules.py` / `rules.js` | **the RikkaHub patch set** — edit and save, no restart |
+| `rgw` | management CLI |
+| `assets/` | local overrides (favicon, logos) |
+
+## Configuration
+
+| Setting | Default | Where |
+|---|---|---|
+| RikkaHub web address | `127.0.0.1:8080` | `rules.py` -> `UPSTREAM` |
+| Listen address | `0.0.0.0:9000` | `rules.py` -> `LISTEN` |
+| Runtime dir | `~/.rgw` | env `RGW_HOME` |
+| Editor | `vi` | env `EDITOR` |
+
+## How it works
+
+```
+request -> strip hop-by-hop + Accept-Encoding
+        -> static override path?    -> serve local file
+        -> SSE?                     -> chunked passthrough, flush per chunk
+        -> HTML (200)               -> regex rewrites + inject css/js before </head>/</body>
+        -> JS  (200, known path)    -> string replacement
+        -> JSON (200, known path)   -> apply transform fn
+        -> restore Content-Length, respond
+```
+
+`rules.py` is re-imported whenever its mtime changes, so edits take effect on
+the next request — zero restarts.
+
+## Limits
+
+- Tuned for RikkaHub's web UI; class names / asset anchors break on redesigns (that's what `rgw check` is for)
+- Single-process — fine for personal use, not load-tested
+- HTML/JS/JSON rewrites need uncompressed responses, so the gateway strips `Accept-Encoding`
+- The sample CSS uses `field-sizing: content` — needs a modern Chromium-based browser
+
+## License
+
+MIT

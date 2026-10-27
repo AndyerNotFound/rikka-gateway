@@ -1,3 +1,3 @@
 #!/usr/bin/env node
-// 入口: node gateway.js (规则在 rules.js, 改完自动生效)
+// Entry point: node gateway.js (rules live in rules.js, hot-reloaded on save)
 require('./server.js');
