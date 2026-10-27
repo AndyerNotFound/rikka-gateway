@@ -165,4 +165,4 @@ RikkaHub 每次更新后跑一遍 `rgw check` —— 产物 hash 会变，它会
 
 ## 许可证
 
-MIT
+AGPL-3.0

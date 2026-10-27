@@ -171,4 +171,4 @@ the next request — zero restarts.
 
 ## License
 
-MIT
+AGPL-3.0
